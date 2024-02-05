@@ -271,6 +271,7 @@
     status = "okay";
 };
 
+
 &spi0 {
     /* needed to avoid dtc warning */
     #address-cells = <1>;
@@ -279,14 +280,32 @@
     status = "okay";
     pinctrl-names = "default";
     pinctrl-0 = <&spi0_pins &spi0_cs_pins>;
-    cs-gpios = <&pio 2 3 GPIO_ACTIVE_HIGH>, <&pio 0 6 GPIO_ACTIVE_HIGH>;
+    cs-gpios = <&pio 2 3 GPIO_ACTIVE_HIGH>;
 
     spidev0: spi@0 {
         compatible = "nanopi,spidev";
         reg = <0>;
-        status = "okay";
+        status = "disabled";
 
         spi-max-frequency = <10000000>;
+    };
+
+    can0: can@0{
+        #address-cells = <1>;
+        #size-cells = <0>;
+        compatible = "microchip,mcp2515";
+        reg = <0>;
+        status = "okay";
+        spi-max-frequency = <1000000>;
+
+        interrupt-parent = <&pio>;
+        interrupts = <0 6 IRQ_TYPE_EDGE_FALLING>;   /* PA6 */
+		interrupt-names = "mcp2515";
+
+        clocks = <&mcp251x_clk>;
+
+        vdd-supply = <&reg_vcc3v3>;
+        xceiver-supply = <&reg_vcc3v3>;
     };
 
     spiflash: spiflash@0 {
@@ -427,7 +446,7 @@
 };
 
 &emac {
-    local-mac-address = [ 00 00 00 00 00 00 ];  
+    local-mac-address = [ 00 00 00 00 00 00 ];
 };
 
 &codec {

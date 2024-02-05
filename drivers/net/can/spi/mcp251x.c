@@ -76,6 +76,7 @@
 #include <linux/spi/spi.h>
 #include <linux/uaccess.h>
 #include <linux/regulator/consumer.h>
+#include <linux/gpio.h>
 
 /* SPI interface instruction set */
 #define INSTRUCTION_WRITE	0x02
@@ -222,6 +223,7 @@
 static int mcp251x_enable_dma; /* Enable SPI DMA. Default: 0 (Off) */
 module_param(mcp251x_enable_dma, int, S_IRUGO);
 MODULE_PARM_DESC(mcp251x_enable_dma, "Enable SPI DMA. Default: 0 (Off)");
+
 
 static const struct can_bittiming_const mcp251x_bittiming_const = {
 	.name = DEVICE_NAME,
@@ -640,7 +642,7 @@ static int mcp251x_hw_reset(struct spi_device *spi)
 
 	/* Wait for oscillator startup timer after reset */
 	mdelay(MCP251X_OST_DELAY_MS);
-	
+
 	reg = mcp251x_read_reg(spi, CANSTAT);
 	if ((reg & CANCTRL_REQOP_MASK) != CANCTRL_REQOP_CONF)
 		return -ENODEV;
@@ -939,6 +941,8 @@ static int mcp251x_open(struct net_device *net)
 	unsigned long flags = IRQF_ONESHOT | IRQF_TRIGGER_FALLING;
 	int ret;
 
+	dev_warn(&spi->dev, "MCP2515 IRQ: %d\n", spi->irq);
+
 	ret = open_candev(net);
 	if (ret) {
 		dev_err(&spi->dev, "unable to set initial baudrate!\n");
@@ -1034,6 +1038,8 @@ static int mcp251x_can_probe(struct spi_device *spi)
 	struct clk *clk;
 	int freq, ret;
 
+	dev_err(&spi->dev, "MCP2515 PROBE IRQ: %d\n", spi->irq);
+
 	clk = devm_clk_get(&spi->dev, NULL);
 	if (IS_ERR(clk)) {
 		if (pdata)
@@ -1079,6 +1085,8 @@ static int mcp251x_can_probe(struct spi_device *spi)
 
 	/* Configure the SPI bus */
 	spi->bits_per_word = 8;
+	spi->mode = SPI_MODE_0;
+
 	if (mcp251x_is_2510(spi))
 		spi->max_speed_hz = spi->max_speed_hz ? : 5 * 1000 * 1000;
 	else

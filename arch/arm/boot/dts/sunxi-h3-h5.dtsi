@@ -58,6 +58,13 @@
 		#size-cells = <1>;
 		ranges;
 
+		mcp251x_clk: mcp251x_clk {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <8000000>;
+			clock-output-names = "mcp251x_clk";
+		};
+
 		osc24M: osc24M_clk {
 			#clock-cells = <0>;
 			compatible = "fixed-clock";
