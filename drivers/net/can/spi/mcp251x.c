@@ -1,5 +1,5 @@
 /*
- * CAN bus driver for Microchip 251x CAN Controller with SPI Interface
+ * CAN bus driver for Microchip 251x/25625 CAN Controller with SPI Interface
  *
  * MCP2510 support and bug fixes by Christian Pellegrin
  * <chripell@evolware.org>
@@ -41,7 +41,7 @@
  * static struct spi_board_info spi_board_info[] = {
  *         {
  *                 .modalias = "mcp2510",
- *			// or "mcp2515" depending on your controller
+ *			// "mcp2515" or "mcp25625" depending on your controller
  *                 .platform_data = &mcp251x_info,
  *                 .irq = IRQ_EINT13,
  *                 .max_speed_hz = 2*1000*1000,
@@ -196,6 +196,38 @@
 #define RXFSIDL(n) ((n) * 4 + 1 + RXFSID(n))
 #define RXFEID8(n) ((n) * 4 + 2 + RXFSID(n))
 #define RXFEID0(n) ((n) * 4 + 3 + RXFSID(n))
+const u8 RXFSIDH[6] = {
+		0x00,
+		0x04,
+		0x08,
+		0x10,
+		0x14,
+		0x18
+	};
+const u8 RXFSIDL[6] = {
+		0x01,
+		0x05,
+		0x09,
+		0x11,
+		0x15,
+		0x19
+	};
+const u8 RXFEID8[6] = {
+		0x02,
+		0x06,
+		0x0A,
+		0x12,
+		0x16,
+		0x1A
+	};
+const u8 RXFEID0[6] = {
+		0x03,
+		0x07,
+		0x0B,
+		0x13,
+		0x17,
+		0x1B
+	};
 #define RXMSIDH(n) ((n) * 4 + 0x20)
 #define RXMSIDL(n) ((n) * 4 + 0x21)
 #define RXMEID8(n) ((n) * 4 + 0x22)
@@ -224,6 +256,29 @@ static int mcp251x_enable_dma; /* Enable SPI DMA. Default: 0 (Off) */
 module_param(mcp251x_enable_dma, int, S_IRUGO);
 MODULE_PARM_DESC(mcp251x_enable_dma, "Enable SPI DMA. Default: 0 (Off)");
 
+static int rxbn_op_mode[2] = {0, 0};
+module_param_array(rxbn_op_mode, int, NULL, S_IRUGO);
+MODULE_PARM_DESC(rxbn_op_mode, "0 = (default) MCP2515 hardware filtering will"
+	" be disabled for receive buffer n (0 or 1)."
+	" rxb0 controls filters 0 and 1, rxb1 controls filters 2-5"
+	" Note there is kernel level filtering, but for high traffic scenarios"
+	" kernel may not be able to keep up."
+	" 1 = use rxbn_mask and rxbn filters, but only accept std CAN ids."
+	" 2 = use rxbn_mask and rxbn filters, but only accept ext CAN ids."
+	" 3 = use rxbn_mask and rxbn filters, and accept ext or std CAN ids.");
+
+static int rxbn_mask[2];
+module_param_array(rxbn_mask, int, NULL, S_IRUGO);
+MODULE_PARM_DESC(rxbn_mask, "Mask used for receive buffer n if rxbn_op_mode "
+	" is 1, 2 or 3. Bits 10-0 for std ids. Bits 29-11 for ext ids.");
+
+static int rxbn_filters[6];
+module_param_array(rxbn_filters, int, NULL, S_IRUGO);
+MODULE_PARM_DESC(rxbn_filters, "Filter used for receive buffer n if "
+	"rxbn_op_mode is 1, 2 or 3. Bits 10-0 for std ids. Bits 29-11 for ext "
+	"ids (also need to set bit 30 for ext id filtering). Note that filters "
+	"0 and 1 correspond to rxbn_op_mode[0] and rxbn_mask[0], while filters "
+	"2-5 corresponds to rxbn_op_mode[1] and rxbn_mask[1]");
 
 static const struct can_bittiming_const mcp251x_bittiming_const = {
 	.name = DEVICE_NAME,
@@ -240,6 +295,7 @@ static const struct can_bittiming_const mcp251x_bittiming_const = {
 enum mcp251x_model {
 	CAN_MCP251X_MCP2510	= 0x2510,
 	CAN_MCP251X_MCP2515	= 0x2515,
+	CAN_MCP251X_MCP25625	= 0x25625,
 };
 
 struct mcp251x_priv {
@@ -614,22 +670,70 @@ static int mcp251x_do_set_bittiming(struct net_device *net)
 	return 0;
 }
 
-static int mcp251x_setup(struct net_device *net, struct mcp251x_priv *priv,
-			 struct spi_device *spi)
+static int mcp251x_setup(struct net_device *net, struct spi_device *spi)
 {
+	int i = 0;
+	uint8_t reg_val = 0;
+
 	mcp251x_do_set_bittiming(net);
 
-	mcp251x_write_reg(spi, RXBCTRL(0),
-			  RXBCTRL_BUKT | RXBCTRL_RXM0 | RXBCTRL_RXM1);
-	mcp251x_write_reg(spi, RXBCTRL(1),
-			  RXBCTRL_RXM0 | RXBCTRL_RXM1);
+	/* Setup recv buffer 0 control. default no hw filtering */
+	reg_val = RXBCTRL_BUKT | RXBCTRL_RXM1 | RXBCTRL_RXM0;
+	if (1 == rxbn_op_mode[0]) {
+		/* std ids only */
+		reg_val = RXBCTRL_BUKT | RXBCTRL_RXM0 ;
+	} else if (2 == rxbn_op_mode[0]) {
+		/* ext ids only */
+		reg_val = RXBCTRL_BUKT | RXBCTRL_RXM1;
+	} else if (3 == rxbn_op_mode[0]) {
+		/* std or ext ids */
+		reg_val = RXBCTRL_BUKT;
+	}
+	mcp251x_write_reg(spi, RXBCTRL(0), reg_val);
+
+	/* Setup recv buffer 1 control. default no hw filtering */
+	reg_val = RXBCTRL_RXM1 | RXBCTRL_RXM0;
+	if (1 == rxbn_op_mode[1]) {
+		/* std ids only */
+		reg_val = RXBCTRL_RXM0 ;
+	} else if (2 == rxbn_op_mode[1]) {
+		/* ext ids only */
+		reg_val = RXBCTRL_RXM1;
+	} else if (3 == rxbn_op_mode[1]) {
+		/* std or ext ids */
+		reg_val = 0;
+	}
+	mcp251x_write_reg(spi, RXBCTRL(1), reg_val);
+
+	/* Fill out mask registers */
+	for (i = 0; i < ARRAY_SIZE(rxbn_mask); i++) {
+		mcp251x_write_reg(spi, RXMSIDH(i), (uint8_t)(rxbn_mask[i]>>3));
+		mcp251x_write_reg(spi, RXMSIDL(i), (uint8_t)((rxbn_mask[i]<<5) |
+			(0x3 & (rxbn_mask[i]>>27))));
+		mcp251x_write_reg(spi, RXMEID8(i), (uint8_t)(rxbn_mask[i]>>19));
+		mcp251x_write_reg(spi, RXMEID0(i), (uint8_t)(rxbn_mask[i]>>11));
+	}
+
+	/* Fill out filter registers */
+	for (i = 0; i < ARRAY_SIZE(rxbn_filters); i++) {
+		mcp251x_write_reg(spi, RXFSIDH[i], (uint8_t)(
+			rxbn_filters[i]>>3));
+		mcp251x_write_reg(spi, RXFSIDL[i], (uint8_t)(
+			(rxbn_filters[i]<<5) | (0x3 & (rxbn_filters[i]>>27)) |
+			(0x8 & (rxbn_filters[i]>>29))));
+		mcp251x_write_reg(spi, RXFEID8[i], (uint8_t)(
+			rxbn_filters[i]>>19));
+		mcp251x_write_reg(spi, RXFEID0[i], (uint8_t)(
+			rxbn_filters[i]>>11));
+	}
+
 	return 0;
 }
 
 static int mcp251x_hw_reset(struct spi_device *spi)
 {
 	struct mcp251x_priv *priv = spi_get_drvdata(spi);
-	u8 reg;
+	unsigned long timeout;
 	int ret;
 
 	/* Wait for oscillator startup timer after power up */
@@ -643,10 +747,19 @@ static int mcp251x_hw_reset(struct spi_device *spi)
 	/* Wait for oscillator startup timer after reset */
 	mdelay(MCP251X_OST_DELAY_MS);
 
-	reg = mcp251x_read_reg(spi, CANSTAT);
-	if ((reg & CANCTRL_REQOP_MASK) != CANCTRL_REQOP_CONF)
-		return -ENODEV;
+	/* Wait for reset to finish */
+	timeout = jiffies + HZ;
+	while ((mcp251x_read_reg(spi, CANSTAT) & CANCTRL_REQOP_MASK) !=
+	       CANCTRL_REQOP_CONF) {
+		usleep_range(MCP251X_OST_DELAY_MS * 1000,
+			     MCP251X_OST_DELAY_MS * 1000 * 2);
 
+		if (time_after(jiffies, timeout)) {
+			dev_err(&spi->dev,
+				"MCP251x didn't enter in conf mode after reset\n");
+			return -EBUSY;
+		}
+	}
 	return 0;
 }
 
@@ -777,7 +890,8 @@ static void mcp251x_restart_work_handler(struct work_struct *ws)
 	mutex_lock(&priv->mcp_lock);
 	if (priv->after_suspend) {
 		mcp251x_hw_reset(spi);
-		mcp251x_setup(net, priv, spi);
+		mcp251x_setup(net, spi);
+		priv->force_quit = 0;
 		if (priv->after_suspend & AFTER_SUSPEND_RESTART) {
 			mcp251x_set_normal_mode(spi);
 		} else if (priv->after_suspend & AFTER_SUSPEND_UP) {
@@ -789,7 +903,6 @@ static void mcp251x_restart_work_handler(struct work_struct *ws)
 			mcp251x_hw_sleep(spi);
 		}
 		priv->after_suspend = 0;
-		priv->force_quit = 0;
 	}
 
 	if (priv->restart_tx) {
@@ -823,9 +936,8 @@ static irqreturn_t mcp251x_can_ist(int irq, void *dev_id)
 		/* receive buffer 0 */
 		if (intf & CANINTF_RX0IF) {
 			mcp251x_hw_rx(spi, 0);
-			/*
-			 * Free one buffer ASAP
-			 * (The MCP2515 does this automatically.)
+			/* Free one buffer ASAP
+			 * (The MCP2515/25625 does this automatically.)
 			 */
 			if (mcp251x_is_2510(spi))
 				mcp251x_write_bits(spi, CANINTF, CANINTF_RX0IF, 0x00);
@@ -834,7 +946,7 @@ static irqreturn_t mcp251x_can_ist(int irq, void *dev_id)
 		/* receive buffer 1 */
 		if (intf & CANINTF_RX1IF) {
 			mcp251x_hw_rx(spi, 1);
-			/* the MCP2515 does this automatically */
+			/* The MCP2515/25625 does this automatically. */
 			if (mcp251x_is_2510(spi))
 				clear_intf |= CANINTF_RX1IF;
 		}
@@ -941,8 +1053,6 @@ static int mcp251x_open(struct net_device *net)
 	unsigned long flags = IRQF_ONESHOT | IRQF_TRIGGER_FALLING;
 	int ret;
 
-	dev_warn(&spi->dev, "MCP2515 IRQ: %d\n", spi->irq);
-
 	ret = open_candev(net);
 	if (ret) {
 		dev_err(&spi->dev, "unable to set initial baudrate!\n");
@@ -956,41 +1066,50 @@ static int mcp251x_open(struct net_device *net)
 	priv->tx_skb = NULL;
 	priv->tx_len = 0;
 
+	if (spi->dev.of_node)
+	    flags = 0;
+
 	ret = request_threaded_irq(spi->irq, NULL, mcp251x_can_ist,
 				   flags | IRQF_ONESHOT, DEVICE_NAME, priv);
 	if (ret) {
 		dev_err(&spi->dev, "failed to acquire irq %d\n", spi->irq);
-		mcp251x_power_enable(priv->transceiver, 0);
-		close_candev(net);
-		goto open_unlock;
+		goto out_close;
 	}
 
 	priv->wq = alloc_workqueue("mcp251x_wq", WQ_FREEZABLE | WQ_MEM_RECLAIM,
 				   0);
+	if (!priv->wq) {
+		ret = -ENOMEM;
+		goto out_clean;
+	}
 	INIT_WORK(&priv->tx_work, mcp251x_tx_work_handler);
 	INIT_WORK(&priv->restart_work, mcp251x_restart_work_handler);
 
 	ret = mcp251x_hw_reset(spi);
-	if (ret) {
-		mcp251x_open_clean(net);
-		goto open_unlock;
-	}
-	ret = mcp251x_setup(net, priv, spi);
-	if (ret) {
-		mcp251x_open_clean(net);
-		goto open_unlock;
-	}
+	if (ret)
+		goto out_free_wq;
+	ret = mcp251x_setup(net, spi);
+	if (ret)
+		goto out_free_wq;
 	ret = mcp251x_set_normal_mode(spi);
-	if (ret) {
-		mcp251x_open_clean(net);
-		goto open_unlock;
-	}
+	if (ret)
+		goto out_free_wq;
 
 	can_led_event(net, CAN_LED_EVENT_OPEN);
 
 	netif_wake_queue(net);
+	mutex_unlock(&priv->mcp_lock);
 
-open_unlock:
+	return 0;
+
+out_free_wq:
+	destroy_workqueue(priv->wq);
+out_clean:
+	free_irq(spi->irq, priv);
+	mcp251x_hw_sleep(spi);
+out_close:
+	mcp251x_power_enable(priv->transceiver, 0);
+	close_candev(net);
 	mutex_unlock(&priv->mcp_lock);
 	return ret;
 }
@@ -1011,6 +1130,10 @@ static const struct of_device_id mcp251x_of_match[] = {
 		.compatible	= "microchip,mcp2515",
 		.data		= (void *)CAN_MCP251X_MCP2515,
 	},
+	{
+		.compatible	= "microchip,mcp25625",
+		.data		= (void *)CAN_MCP251X_MCP25625,
+	},
 	{ }
 };
 MODULE_DEVICE_TABLE(of, mcp251x_of_match);
@@ -1023,6 +1146,10 @@ static const struct spi_device_id mcp251x_id_table[] = {
 	{
 		.name		= "mcp2515",
 		.driver_data	= (kernel_ulong_t)CAN_MCP251X_MCP2515,
+	},
+	{
+		.name		= "mcp25625",
+		.driver_data	= (kernel_ulong_t)CAN_MCP251X_MCP25625,
 	},
 	{ }
 };
@@ -1037,8 +1164,6 @@ static int mcp251x_can_probe(struct spi_device *spi)
 	struct mcp251x_priv *priv;
 	struct clk *clk;
 	int freq, ret;
-
-	dev_err(&spi->dev, "MCP2515 PROBE IRQ: %d\n", spi->irq);
 
 	clk = devm_clk_get(&spi->dev, NULL);
 	if (IS_ERR(clk)) {
@@ -1085,8 +1210,6 @@ static int mcp251x_can_probe(struct spi_device *spi)
 
 	/* Configure the SPI bus */
 	spi->bits_per_word = 8;
-	spi->mode = SPI_MODE_0;
-
 	if (mcp251x_is_2510(spi))
 		spi->max_speed_hz = spi->max_speed_hz ? : 5 * 1000 * 1000;
 	else
@@ -1268,5 +1391,5 @@ module_spi_driver(mcp251x_can_driver);
 
 MODULE_AUTHOR("Chris Elston <celston@katalix.com>, "
 	      "Christian Pellegrin <chripell@evolware.org>");
-MODULE_DESCRIPTION("Microchip 251x CAN driver");
+MODULE_DESCRIPTION("Microchip 251x/25625 CAN driver");
 MODULE_LICENSE("GPL v2");
