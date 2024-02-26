@@ -953,7 +953,8 @@ static irqreturn_t mcp251x_can_ist(int irq, void *dev_id)
 
 		/* any error or tx interrupt we need to clear? */
 		if (intf & (CANINTF_ERR | CANINTF_TX))
-			clear_intf |= intf & (CANINTF_ERR | CANINTF_TX) & ~(CANINTF_RX0IF | CANINTF_RX1IF);
+			clear_intf |= intf & (CANINTF_ERR | CANINTF_TX);
+			// clear_intf |= intf & (CANINTF_ERR | CANINTF_TX) & ~(CANINTF_RX0IF | CANINTF_RX1IF);
 		if (clear_intf)
 			mcp251x_write_bits(spi, CANINTF, clear_intf, 0x00);
 
@@ -985,7 +986,7 @@ static irqreturn_t mcp251x_can_ist(int irq, void *dev_id)
 		}
 
 		// Add to fix can frame lost, maybe SPI issue?
-		udelay(20);
+		udelay(30);
 
 		/* Update can state statistics */
 		switch (priv->can.state) {
